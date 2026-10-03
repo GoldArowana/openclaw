@@ -5,7 +5,8 @@ const PROMOTION_SECTION_HEADING_RE = /^## Promoted From Short-Term Memory \(([^)
 
 const PROMOTION_SUBSECTION_HEADING_RE = /^### (?:Global|Project: .+?)\s*$/;
 
-const PROMOTION_ENTRY_MARKER_RE = /^<!--\s*openclaw-memory-promotion:.*-->\s*$/i;
+// Match a single comment so inline user content keeps the block preserved.
+const PROMOTION_ENTRY_MARKER_RE = /^<!--\s*openclaw-memory-promotion:(?:(?!-->)[^\n])*-->\s*$/i;
 
 const ATX_HEADING_RE = /^ {0,3}#{1,6}(?:[ \t]|$)/;
 

@@ -384,6 +384,24 @@ describe("compactMemoryForBudget — bounded MEMORY.md compaction (regression fo
     expect(result.compacted).toBe(existing);
   });
 
+  it.each([
+    [
+      "inline user text",
+      `${PROMOTION_MARKER_LINE} USER-AUTHORED: keep this note. <!-- unrelated -->`,
+    ],
+    ["an additional comment", `${PROMOTION_MARKER_LINE} <!-- USER-AUTHORED: keep this note. -->`],
+  ])("preserves a promotion block with %s after its marker", (_name, markerLine) => {
+    const existing = promotionSection("2026-04-10", 400).replace(PROMOTION_MARKER_LINE, markerLine);
+    const result = compactMemoryForBudget({
+      existingMemory: existing,
+      newSection: `\n${promotionSection("2026-04-29", 600)}`,
+      budgetChars: 700,
+    });
+
+    expect(result.droppedDates).toEqual([]);
+    expect(result.compacted).toBe(existing);
+  });
+
   it("preserves an entire mixed block when user text follows a generated entry", () => {
     const existing = [
       promotionSection("2026-04-10", 400),
