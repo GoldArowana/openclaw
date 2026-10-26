@@ -99,7 +99,7 @@ export const MOBILE_PAIRING_AUDIT_CLIENT: MobileClientMetadata = Object.freeze({
 
 // Shipped iOS 2026.8.10 builds derive this default-on iPhone surface before
 // every node connect. Keep it fixed so historical reconnects cannot drift.
-export const MOBILE_PAIRING_NODE_CAPS = Object.freeze([
+const MOBILE_PAIRING_NODE_CAPS = Object.freeze([
   "canvas",
   "screen",
   "camera",
@@ -113,7 +113,7 @@ export const MOBILE_PAIRING_NODE_CAPS = Object.freeze([
   "motion",
 ]);
 
-export const MOBILE_PAIRING_NODE_COMMANDS = Object.freeze([
+const MOBILE_PAIRING_NODE_COMMANDS = Object.freeze([
   "canvas.present",
   "canvas.hide",
   "canvas.navigate",
@@ -147,7 +147,7 @@ export const MOBILE_PAIRING_NODE_COMMANDS = Object.freeze([
   "motion.pedometer",
 ]);
 
-export const MOBILE_PAIRING_NODE_PERMISSIONS = Object.freeze({
+const MOBILE_PAIRING_NODE_PERMISSIONS = Object.freeze({
   camera: false,
   microphone: false,
   speechRecognition: false,
@@ -160,7 +160,7 @@ export const MOBILE_PAIRING_NODE_PERMISSIONS = Object.freeze({
   motion: false,
 });
 
-export const MOBILE_PAIRING_OPERATOR_CAPS = Object.freeze(["inline-widgets"]);
+const MOBILE_PAIRING_OPERATOR_CAPS = Object.freeze(["inline-widgets"]);
 export const MOBILE_PAIRING_APPROVAL_SCOPES = Object.freeze(["operator.pairing", "operator.admin"]);
 
 const GATEWAY_PROTOCOL_VERSION = 4;
@@ -189,7 +189,7 @@ function sha256(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-export function buildDeviceAuthCompatibilityPayloadV2(params: {
+function buildDeviceAuthCompatibilityPayloadV2(params: {
   deviceId: string;
   clientId: string;
   clientMode: string;
@@ -885,16 +885,18 @@ async function verifyReconnect(params: {
 }): Promise<void> {
   const WebSocket = loadWebSocket(params.packageRoot);
   await assertMissingPassword({ WebSocket, credentials: params.credentials });
-  const node = await connect({
-    WebSocket,
-    url: params.credentials.url,
-    client: params.credentials.client,
-    mode: "node",
-    role: "node",
-    scopes: params.credentials.node.scopes,
-    auth: { token: params.credentials.node.token },
-    identity: params.credentials.identity,
-  });
+  const connectRole = (role: ConnectRole) =>
+    connect({
+      WebSocket,
+      url: params.credentials.url,
+      client: params.credentials.client,
+      mode: role === "node" ? "node" : "ui",
+      role,
+      scopes: params.credentials[role].scopes,
+      auth: { token: params.credentials[role].token },
+      identity: params.credentials.identity,
+    });
+  const node = await connectRole("node");
   let operator: ConnectResult | undefined;
   try {
     const nodeTransition = persistHelloCredential({
@@ -903,16 +905,7 @@ async function verifyReconnect(params: {
       hello: node.hello,
     });
     writePrivateJson(params.credentialsFile, params.credentials);
-    operator = await connect({
-      WebSocket,
-      url: params.credentials.url,
-      client: params.credentials.client,
-      mode: "ui",
-      role: "operator",
-      scopes: params.credentials.operator.scopes,
-      auth: { token: params.credentials.operator.token },
-      identity: params.credentials.identity,
-    });
+    operator = await connectRole("operator");
     const operatorTransition = persistHelloCredential({
       credentials: params.credentials,
       role: "operator",

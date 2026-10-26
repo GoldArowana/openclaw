@@ -14,10 +14,16 @@ import { loadOutboundMediaFromUrl } from "openclaw/plugin-sdk/outbound-media";
 import { retryAsync } from "openclaw/plugin-sdk/retry-runtime";
 import { logVerbose, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 import { fetchWithSsrFGuard, type SsrFPolicy } from "openclaw/plugin-sdk/ssrf-runtime";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { formatSlackError } from "./errors.js";
 import {
-  postSlackMessageWithIdentityFallback,
+  asOptionalObjectRecord,
+  isRecord,
+  normalizeLowercaseStringOrEmpty,
+  normalizeTrimmedStringList,
+} from "openclaw/plugin-sdk/string-coerce-runtime";
+import { formatSlackError, getSlackWebApiErrorData } from "./errors.js";
+import {
+  buildSlackMessageIdentityPayload,
+  hasSlackMessageIdentity,
   type SlackPostMessageIdentity,
 } from "./post-message-identity.js";
 import {
@@ -63,23 +69,16 @@ export function rethrowSlackPermanentOutboundApiRejection(err: unknown): never {
   throw err;
 }
 
-function readSlackRequestErrorCode(value: unknown): string | undefined {
-  if (!value || typeof value !== "object") {
-    return undefined;
-  }
-  const code = (value as { code?: unknown }).code;
-  return typeof code === "string" ? code.toUpperCase() : undefined;
-}
-
 function hasSlackDnsRequestSignal(err: unknown): boolean {
-  let current: unknown = err;
+  let current = asOptionalObjectRecord(err);
   const seen = new Set<unknown>();
-  for (let depth = 0; current && typeof current === "object" && depth < 6; depth += 1) {
+  for (let depth = 0; current && depth < 6; depth += 1) {
     if (seen.has(current)) {
       return false;
     }
     seen.add(current);
-    const code = readSlackRequestErrorCode(current);
+    const rawCode = current.code;
+    const code = typeof rawCode === "string" ? rawCode.toUpperCase() : undefined;
     if (code && SLACK_DNS_RETRY_CODES.has(code)) {
       return true;
     }
@@ -87,9 +86,7 @@ function hasSlackDnsRequestSignal(err: unknown): boolean {
     if (/\b(EAI_AGAIN|ENOTFOUND|UND_ERR_DNS_RESOLVE_FAILED)\b/i.test(message)) {
       return true;
     }
-    current =
-      (current as { original?: unknown; cause?: unknown }).original ??
-      (current as { cause?: unknown }).cause;
+    current = asOptionalObjectRecord(current.original ?? current.cause);
   }
   return false;
 }
@@ -218,6 +215,26 @@ export function requireSlackPostMessageTimestamp(
   return timestamp;
 }
 
+function classifySlackCustomIdentityError(err: unknown): "scope" | "argument" | undefined {
+  const data = getSlackWebApiErrorData(err);
+  const code = normalizeLowercaseStringOrEmpty(data?.error);
+  if (code === "invalid_arguments" || code === "invalid_arg_name") {
+    return "argument";
+  }
+  if (code !== "missing_scope") {
+    return undefined;
+  }
+  const needed = normalizeLowercaseStringOrEmpty(data?.needed);
+  if (needed.includes("chat:write.customize")) {
+    return "scope";
+  }
+  const scopes = [
+    ...normalizeTrimmedStringList(data?.response_metadata?.scopes),
+    ...normalizeTrimmedStringList(data?.response_metadata?.acceptedScopes),
+  ].map((scope) => normalizeLowercaseStringOrEmpty(scope));
+  return scopes.includes("chat:write.customize") ? "scope" : undefined;
+}
+
 export async function postSlackMessageBestEffort(params: {
   client: WebClient;
   channelId: string;
@@ -238,11 +255,45 @@ export async function postSlackMessageBestEffort(params: {
     ).catch(rethrowSlackPermanentOutboundApiRejection),
     identity,
   });
-  const posted = await postSlackMessageWithIdentityFallback({
-    basePayload,
-    identity: params.identity,
-    post,
-  });
+  const identity = params.identity;
+  const posted = await (async () => {
+    try {
+      if (!identity) {
+        return await post(basePayload);
+      }
+      return await post(
+        { ...basePayload, ...buildSlackMessageIdentityPayload(identity) },
+        identity,
+      );
+    } catch (err) {
+      if (!identity || !hasSlackMessageIdentity(identity)) {
+        throw err;
+      }
+      const rejection = classifySlackCustomIdentityError(err);
+      if (!rejection) {
+        throw err;
+      }
+      if (
+        rejection === "argument" &&
+        identity.username &&
+        (identity.iconUrl || identity.iconEmoji)
+      ) {
+        logVerbose("slack send: custom icon rejected, retrying with username only");
+        try {
+          return await post(
+            { ...basePayload, username: identity.username },
+            { username: identity.username },
+          );
+        } catch (retryError) {
+          if (!classifySlackCustomIdentityError(retryError)) {
+            throw retryError;
+          }
+        }
+      }
+      logVerbose("slack send: custom identity rejected, retrying without custom identity");
+      return post(basePayload);
+    }
+  })();
   const timestamp = requireSlackPostMessageTimestamp(posted.response);
   return {
     ...posted,

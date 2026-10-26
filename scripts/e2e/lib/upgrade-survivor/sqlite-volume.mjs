@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import {
   readSqliteTranscriptPayload,
@@ -38,30 +37,19 @@ const PREEXISTING_SESSION_FIXTURES = [
 export function measureVolumeDoctorBudget(stateDir) {
   const counts = { sessions: 0, events: 0, cronJobs: 0, pluginRoots: 0 };
   for (const agentId of VOLUME_AGENT_IDS) {
-    const db = new DatabaseSync(
-      path.join(stateDir, "agents", agentId, "agent", "openclaw-agent.sqlite"),
-      { readOnly: true },
-    );
-    try {
+    readDatabase(path.join(stateDir, "agents", agentId, "agent", "openclaw-agent.sqlite"), (db) => {
       counts.sessions += Number(
         db.prepare("SELECT count(*) AS count FROM session_nodes").get().count,
       );
       counts.events += Number(
         db.prepare("SELECT count(*) AS count FROM transcript_events").get().count,
       );
-    } finally {
-      db.close();
-    }
+    });
   }
-  const db = new DatabaseSync(path.join(stateDir, "state", "openclaw.sqlite"), {
-    readOnly: true,
-  });
-  try {
+  readDatabase(path.join(stateDir, "state", "openclaw.sqlite"), (db) => {
     counts.cronJobs = Number(db.prepare("SELECT count(*) AS count FROM cron_jobs").get().count);
-  } finally {
-    db.close();
-  }
-  const index = readPluginInstallIndex({ stateDir, configPath: null });
+  });
+  const index = readPluginInstallIndex({ stateDir, configPath: null, summary: true });
   counts.pluginRoots = new Set(
     (index.plugins ?? []).filter((plugin) => plugin.enabled).map((plugin) => plugin.rootDir),
   ).size;
@@ -291,30 +279,32 @@ function seedUpgradeVolumeSessions(stateDir) {
   }
 }
 
-async function seedUpgradeVolumeCronJobs(stateDir, packageRoot) {
-  assert(packageRoot, "volume cron fixture requires the installed baseline package root");
+export async function seedPublishedCronJobs(stateDir, packageRoot, jobs) {
+  assert(packageRoot, "cron fixture requires the installed baseline package root");
   const packageJsonPath = path.join(path.resolve(packageRoot), "package.json");
   const manifest = readJson(packageJsonPath);
-  assert(manifest.name === "openclaw", "volume cron SDK must belong to the installed package");
+  assert(manifest.name === "openclaw", "cron SDK must belong to the installed package");
   assert(
     manifest.version === process.env.OPENCLAW_UPGRADE_SURVIVOR_BASELINE_VERSION,
-    "volume cron SDK version differs from the installed CLI",
+    "cron SDK version differs from the installed CLI",
   );
   const installedRequire = createRequire(packageJsonPath);
   // Use the published writer so the fixture cannot initialize candidate schema or codecs.
   const sdkUrl = pathToFileURL(installedRequire.resolve("openclaw/plugin-sdk/cron-store-runtime"));
   const { loadCronStore, saveCronStore } = await import(sdkUrl.href);
-  const spec = getVolumeSpec();
-  const jobs = Array.from({ length: spec.cronJobs }, (_, index) => getVolumeCronJob(index));
   const storePath = path.join(stateDir, "cron", "jobs.json");
   await saveCronStore(storePath, { version: 1, jobs });
-  assertVolumeCronJobs((await loadCronStore(storePath)).jobs, spec, "published SDK round-trip");
+  const saved = (await loadCronStore(storePath)).jobs;
   assert(!fs.existsSync(storePath), "published cron writer created a retired JSON store");
+  return saved;
 }
 
 export async function seedUpgradeVolume(stateDir, packageRoot) {
   seedUpgradeVolumeSessions(stateDir);
-  await seedUpgradeVolumeCronJobs(stateDir, packageRoot);
+  const spec = getVolumeSpec();
+  const jobs = Array.from({ length: spec.cronJobs }, (_, index) => getVolumeCronJob(index));
+  const saved = await seedPublishedCronJobs(stateDir, packageRoot, jobs);
+  assertVolumeCronJobs(saved, spec, "published SDK round-trip");
   seedUpgradeVolumeSharedState(stateDir);
 }
 

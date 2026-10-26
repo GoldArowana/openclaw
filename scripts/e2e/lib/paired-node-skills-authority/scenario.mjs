@@ -22,6 +22,9 @@ const require = createRequire(path.join(packageDir, "package.json"));
 const { GatewayClient } = await import(
   pathToFileURL(require.resolve("openclaw/plugin-sdk/gateway-runtime"))
 );
+const { listDirectoryTreeStrictSync } = await import(
+  pathToFileURL(require.resolve("openclaw/plugin-sdk/file-access-runtime"))
+);
 const JSZip = require("jszip");
 const root = process.argv[3]
   ? path.resolve(process.argv[3])
@@ -215,6 +218,20 @@ try {
     await rpc("skills.upload.commit", { uploadId });
     return { source: "upload", agentId: "main", uploadId, slug, force };
   }
+  async function waitForUploadPolicy(label, enabled) {
+    await wait(label, async () => {
+      try {
+        await rpc("skills.upload.begin", {
+          kind: "skill-archive",
+          slug: enabled ? "admission" : slug,
+          sizeBytes: 1,
+        });
+        return enabled;
+      } catch (error) {
+        return enabled ? false : error.message.includes("uploads are disabled");
+      }
+    });
+  }
   await wait("paired workspace activation", async () => {
     try {
       await rpc("skills.status", { agentId: "main" });
@@ -228,10 +245,12 @@ try {
   assert(fs.readFileSync(path.join(target, "SKILL.md"), "utf8").includes("original"));
   const snapshot = () =>
     Object.fromEntries(
-      fs
-        .readdirSync(target, { recursive: true })
-        .filter((p) => fs.statSync(path.join(target, p)).isFile())
-        .map((p) => [p, fs.readFileSync(path.join(target, p)).toString("base64")]),
+      listDirectoryTreeStrictSync(target)
+        .filter(({ dirent }) => dirent.isFile())
+        .map(({ relativePath: p }) => [
+          p,
+          fs.readFileSync(path.join(target, p)).toString("base64"),
+        ]),
     );
   const metadata = () =>
     Object.fromEntries(
@@ -247,14 +266,7 @@ try {
   const pendingUpload = await stage("replacement", true);
   config.gateway.uploads.enabled = false;
   await setConfig();
-  await wait("uploads disabled", async () => {
-    try {
-      await rpc("skills.upload.begin", { kind: "skill-archive", slug, sizeBytes: 1 });
-      return false;
-    } catch (e) {
-      return e.message.includes("uploads are disabled");
-    }
-  });
+  await waitForUploadPolicy("uploads disabled", false);
   await assert.rejects(rpc("skills.install", pendingUpload), /uploads are disabled/);
   assert.deepEqual(snapshot(), before);
   assert.deepEqual(metadata(), metadataBefore);
@@ -265,14 +277,7 @@ try {
   });
   config.gateway.uploads.enabled = true;
   await setConfig();
-  await wait("uploads reenabled", async () => {
-    try {
-      await rpc("skills.upload.begin", { kind: "skill-archive", slug: "admission", sizeBytes: 1 });
-      return true;
-    } catch {
-      return false;
-    }
-  });
+  await waitForUploadPolicy("uploads reenabled", true);
   fs.writeFileSync(barrier + ".release", "");
   fs.writeFileSync(barrier + ".armed", "");
   const pending = rpc("skills.install", pendingUpload).then(
@@ -291,14 +296,7 @@ try {
   record("paused-after-backup", { targetAbsent: true, backupCount: backups.length });
   config.gateway.uploads.enabled = false;
   await setConfig();
-  await wait("revocation committed", async () => {
-    try {
-      await rpc("skills.upload.begin", { kind: "skill-archive", slug, sizeBytes: 1 });
-      return false;
-    } catch (e) {
-      return e.message.includes("uploads are disabled");
-    }
-  });
+  await waitForUploadPolicy("revocation committed", false);
   fs.writeFileSync(barrier + ".release", "release");
   const refused = await pending;
   assert(JSON.stringify(refused).includes("uploads are disabled"), JSON.stringify(refused));
